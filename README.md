@@ -35,7 +35,8 @@ Aplicación web para la gestión de estacionamiento construida para el proyecto 
 
 ## Endpoints
 
-- `GET /api/dashboard`, `/clientes`, `/vehiculos`, `/espacios`, `/estadias`, `/pagos`.
-- `GET /api/reportes/ocupacion`, `/ingresos`, `/ingresos-metodo`, `/vehiculos-tipo`, `/estadias-estado`, `/ingresos-fecha`.
+- `GET /api/dashboard`, `/clientes`, `/vehiculos`, `/espacios`, `/estadias`, `/estadias/activas`, `/pagos`.
+- `POST` y `PUT` para `/api/clientes`, `/api/vehiculos` y `/api/espacios`; además de los catálogos `GET /api/tipos-vehiculo`, `/usuarios`, `/metodos-pago` y `/zonas`.
+- `GET /api/reportes/ocupacion`, `/ingresos`, `/ingresos-metodo`, `/vehiculos-tipo`, `/estadias-estado`, `/ingresos-fecha` y `/historial`.
 - `POST /api/entrada` con `placa`, `codigo_espacio`, `nombre_usuario`.
 - `POST /api/salida` con `estadia_id`, `metodo_pago`.
