@@ -1,0 +1,8 @@
+{
+  "name": "parkcontrol-backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": { "start": "node src/app.js", "dev": "node --watch src/app.js", "check": "node --check src/app.js && node --check src/config/database.js && node --check src/routes/dashboard.routes.js && node --check src/routes/clientes.routes.js && node --check src/routes/vehiculos.routes.js && node --check src/routes/espacios.routes.js && node --check src/routes/estadias.routes.js && node --check src/routes/pagos.routes.js && node --check src/routes/reportes.routes.js" },
+  "dependencies": { "cors": "^2.8.5", "dotenv": "^16.6.1", "express": "^4.21.2", "pg": "^8.16.3" }
+}
