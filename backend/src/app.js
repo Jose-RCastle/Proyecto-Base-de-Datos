@@ -7,6 +7,7 @@ import espaciosRoutes from './routes/espacios.routes.js';
 import estadiasRoutes from './routes/estadias.routes.js';
 import pagosRoutes from './routes/pagos.routes.js';
 import reportesRoutes from './routes/reportes.routes.js';
+import pool from './config/database.js';
 
 const app = express();
 app.use(cors());
@@ -20,7 +21,11 @@ app.use('/api/estadias', estadiasRoutes);
 app.use('/api/pagos', pagosRoutes);
 app.use('/api/reportes', reportesRoutes);
 app.use('/api', estadiasRoutes);
-app.use((error, _req, res, _next) => { console.error(error); const message = error.code === '23505' ? 'Ya existe un registro con esos datos.' : (error.message || 'Ocurrió un error al procesar la solicitud.'); res.status(error.code?.startsWith('23') ? 400 : 500).json({ error: message }); });
+app.get('/api/tipos-vehiculo', async (_req, res, next) => { try { const { rows } = await pool.query('SELECT tipo_vehiculo_id, nombre, descripcion FROM tipos_vehiculo ORDER BY nombre'); res.json(rows); } catch (error) { next(error); } });
+app.get('/api/usuarios', async (_req, res, next) => { try { const { rows } = await pool.query('SELECT usuario_id, nombre_usuario, nombre_completo, rol FROM usuarios WHERE activo = TRUE ORDER BY nombre_completo'); res.json(rows); } catch (error) { next(error); } });
+app.get('/api/metodos-pago', async (_req, res, next) => { try { const { rows } = await pool.query('SELECT metodo_pago_id, nombre FROM metodos_pago ORDER BY nombre'); res.json(rows); } catch (error) { next(error); } });
+app.get('/api/zonas', async (_req, res, next) => { try { const { rows } = await pool.query('SELECT zona_id, nombre, descripcion FROM zonas ORDER BY nombre'); res.json(rows); } catch (error) { next(error); } });
+app.use((error, _req, res, _next) => { console.error(error); const dbMessages = { '23505': 'Ya existe un registro con esos datos.', '23503': 'No se puede completar la operación porque el registro está relacionado con otros datos.', '23514': 'Los datos no cumplen las restricciones registradas.' }; const message = dbMessages[error.code] || error.message || 'Ocurrió un error al procesar la solicitud.'; res.status(error.code?.startsWith('23') || error.severity === 'ERROR' ? 400 : 500).json({ error: message }); });
 
 const port = Number(process.env.PORT || 3000);
 app.listen(port, () => console.log(`PARKCONTROL API disponible en http://localhost:${port}`));
