@@ -1230,3 +1230,485 @@ ALTER TABLE ONLY public.vehiculos
 
 \unrestrict byHCXaM1APwYOPoPKh2KRp7SCY1t8Fr81KjjHuIBNk9nZTwxLr61jGUU09b6QId
 
+
+--
+-- Migración
+--
+
+BEGIN;
+
+-- ============================================================
+-- PARKCONTROL - MIGRACIÓN V2
+-- Objetivo:
+--   1. Permitir vehículos sin cliente registrado.
+--   2. Reforzar integridad de estadías activas.
+--   3. Validar compatibilidad vehículo <-> espacio.
+--   4. Normalizar búsqueda de placas.
+--   5. Crear consultas/vistas útiles para la API.
+-- ============================================================
+
+
+-- ============================================================
+-- 1. CLIENTE OPCIONAL EN VEHÍCULOS
+-- ============================================================
+
+ALTER TABLE public.vehiculos
+ALTER COLUMN cliente_id DROP NOT NULL;
+
+
+-- ============================================================
+-- 2. EVITAR MÁS DE UNA ESTADÍA ACTIVA POR VEHÍCULO
+-- ============================================================
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_estadia_vehiculo_activa
+ON public.estadias (vehiculo_id)
+WHERE estado = 'ACTIVA';
+
+
+-- ============================================================
+-- 3. EVITAR MÁS DE UNA ESTADÍA ACTIVA POR ESPACIO
+-- ============================================================
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_estadia_espacio_activa
+ON public.estadias (espacio_id)
+WHERE estado = 'ACTIVA';
+
+
+-- ============================================================
+-- 4. ÍNDICES ÚTILES PARA LAS OPERACIONES
+-- ============================================================
+
+CREATE INDEX IF NOT EXISTS idx_vehiculos_tipo
+ON public.vehiculos (tipo_vehiculo_id);
+
+CREATE INDEX IF NOT EXISTS idx_vehiculos_cliente
+ON public.vehiculos (cliente_id);
+
+CREATE INDEX IF NOT EXISTS idx_estadias_vehiculo_estado
+ON public.estadias (vehiculo_id, estado);
+
+
+-- ============================================================
+-- 5. ACTUALIZAR registrar_entrada
+--
+-- Reglas:
+--   - El vehículo debe existir.
+--   - El espacio debe existir.
+--   - El espacio debe estar disponible.
+--   - El tipo de vehículo debe coincidir con el espacio.
+--   - Debe existir una tarifa activa.
+--   - El usuario debe existir y estar activo.
+--   - El vehículo no puede tener otra estadía activa.
+--   - La fecha/hora de entrada la determina PostgreSQL.
+-- ============================================================
+
+CREATE OR REPLACE FUNCTION public.registrar_entrada(
+    p_placa VARCHAR,
+    p_codigo_espacio VARCHAR,
+    p_nombre_usuario VARCHAR
+)
+RETURNS INTEGER
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_vehiculo_id INTEGER;
+    v_tipo_vehiculo_id INTEGER;
+    v_espacio_id INTEGER;
+    v_tipo_espacio_id INTEGER;
+    v_tarifa_id INTEGER;
+    v_usuario_id INTEGER;
+    v_estadia_id INTEGER;
+    v_estado_espacio VARCHAR(20);
+    v_placa VARCHAR(15);
+BEGIN
+
+    -- Normalizar placa
+    v_placa := UPPER(TRIM(p_placa));
+
+    -- ==========================================
+    -- Buscar vehículo
+    -- ==========================================
+
+    SELECT
+        vehiculo_id,
+        tipo_vehiculo_id
+    INTO
+        v_vehiculo_id,
+        v_tipo_vehiculo_id
+    FROM public.vehiculos
+    WHERE UPPER(TRIM(placa)) = v_placa;
+
+    IF v_vehiculo_id IS NULL THEN
+        RAISE EXCEPTION
+            'El vehículo con placa % no existe.',
+            v_placa;
+    END IF;
+
+
+    -- ==========================================
+    -- Buscar espacio
+    -- ==========================================
+
+    SELECT
+        espacio_id,
+        tipo_vehiculo_id,
+        estado
+    INTO
+        v_espacio_id,
+        v_tipo_espacio_id,
+        v_estado_espacio
+    FROM public.espacios
+    WHERE UPPER(TRIM(codigo)) = UPPER(TRIM(p_codigo_espacio));
+
+    IF v_espacio_id IS NULL THEN
+        RAISE EXCEPTION
+            'El espacio % no existe.',
+            p_codigo_espacio;
+    END IF;
+
+
+    -- ==========================================
+    -- Verificar disponibilidad
+    -- ==========================================
+
+    IF v_estado_espacio <> 'DISPONIBLE' THEN
+        RAISE EXCEPTION
+            'El espacio % no está disponible. Estado actual: %',
+            p_codigo_espacio,
+            v_estado_espacio;
+    END IF;
+
+
+    -- ==========================================
+    -- Verificar compatibilidad
+    -- ==========================================
+
+    IF v_tipo_vehiculo_id <> v_tipo_espacio_id THEN
+        RAISE EXCEPTION
+            'El vehículo de tipo % no puede utilizar el espacio % porque está destinado a otro tipo de vehículo.',
+            v_tipo_vehiculo_id,
+            p_codigo_espacio;
+    END IF;
+
+
+    -- ==========================================
+    -- Buscar tarifa activa
+    -- ==========================================
+
+    SELECT t.tarifa_id
+    INTO v_tarifa_id
+    FROM public.tarifas t
+    WHERE t.tipo_vehiculo_id = v_tipo_vehiculo_id
+      AND t.activa = TRUE
+    ORDER BY t.tarifa_id
+    LIMIT 1;
+
+    IF v_tarifa_id IS NULL THEN
+        RAISE EXCEPTION
+            'No existe una tarifa activa para el vehículo con placa %.',
+            v_placa;
+    END IF;
+
+
+    -- ==========================================
+    -- Buscar usuario operador
+    -- ==========================================
+
+    SELECT usuario_id
+    INTO v_usuario_id
+    FROM public.usuarios
+    WHERE nombre_usuario = p_nombre_usuario
+      AND activo = TRUE;
+
+    IF v_usuario_id IS NULL THEN
+        RAISE EXCEPTION
+            'El usuario % no existe o está inactivo.',
+            p_nombre_usuario;
+    END IF;
+
+
+    -- ==========================================
+    -- Verificar estadía activa
+    -- ==========================================
+
+    IF EXISTS (
+        SELECT 1
+        FROM public.estadias
+        WHERE vehiculo_id = v_vehiculo_id
+          AND estado = 'ACTIVA'
+    ) THEN
+        RAISE EXCEPTION
+            'El vehículo % ya tiene una estadía activa.',
+            v_placa;
+    END IF;
+
+
+    -- ==========================================
+    -- Crear estadía
+    -- ==========================================
+
+    INSERT INTO public.estadias (
+        vehiculo_id,
+        espacio_id,
+        tarifa_id,
+        usuario_id,
+        fecha_entrada,
+        estado
+    )
+    VALUES (
+        v_vehiculo_id,
+        v_espacio_id,
+        v_tarifa_id,
+        v_usuario_id,
+        CURRENT_TIMESTAMP,
+        'ACTIVA'
+    )
+    RETURNING estadia_id
+    INTO v_estadia_id;
+
+
+    -- ==========================================
+    -- Marcar espacio como ocupado
+    -- ==========================================
+
+    UPDATE public.espacios
+    SET estado = 'OCUPADO'
+    WHERE espacio_id = v_espacio_id;
+
+
+    RETURN v_estadia_id;
+
+END;
+$$;
+
+
+-- ============================================================
+-- 6. VISTA: ESTADÍAS ACTIVAS
+--
+-- Será muy útil para la pantalla SALIDA.
+-- La API podrá consultar directamente esta vista.
+-- ============================================================
+
+CREATE OR REPLACE VIEW public.v_estadias_activas AS
+SELECT
+    e.estadia_id,
+    v.vehiculo_id,
+    v.placa,
+    tv.nombre AS tipo_vehiculo,
+
+    c.cliente_id,
+
+    CASE
+        WHEN c.cliente_id IS NULL THEN 'Cliente ocasional'
+        ELSE c.nombre || ' ' || c.apellido
+    END AS cliente,
+
+    e.espacio_id,
+    es.codigo AS espacio,
+    z.zona_id,
+    z.nombre AS zona,
+
+    e.fecha_entrada,
+
+    EXTRACT(
+        EPOCH FROM (CURRENT_TIMESTAMP - e.fecha_entrada)
+    ) / 60 AS minutos_transcurridos,
+
+    t.tarifa_id,
+    t.nombre AS tarifa,
+    t.precio_hora,
+
+    e.estado
+
+FROM public.estadias e
+
+JOIN public.vehiculos v
+    ON v.vehiculo_id = e.vehiculo_id
+
+JOIN public.tipos_vehiculo tv
+    ON tv.tipo_vehiculo_id = v.tipo_vehiculo_id
+
+LEFT JOIN public.clientes c
+    ON c.cliente_id = v.cliente_id
+
+JOIN public.espacios es
+    ON es.espacio_id = e.espacio_id
+
+JOIN public.zonas z
+    ON z.zona_id = es.zona_id
+
+JOIN public.tarifas t
+    ON t.tarifa_id = e.tarifa_id
+
+WHERE e.estado = 'ACTIVA';
+
+
+-- ============================================================
+-- 7. VISTA: ESPACIOS DISPONIBLES
+--
+-- La API podrá utilizarla para llenar el dropdown
+-- de la pantalla ENTRADA.
+-- ============================================================
+
+CREATE OR REPLACE VIEW public.v_espacios_disponibles AS
+SELECT
+    e.espacio_id,
+    e.codigo AS espacio,
+    e.zona_id,
+    z.nombre AS zona,
+    e.tipo_vehiculo_id,
+    tv.nombre AS tipo_vehiculo,
+    e.estado
+FROM public.espacios e
+
+JOIN public.zonas z
+    ON z.zona_id = e.zona_id
+
+JOIN public.tipos_vehiculo tv
+    ON tv.tipo_vehiculo_id = e.tipo_vehiculo_id
+
+WHERE e.estado = 'DISPONIBLE';
+
+
+-- ============================================================
+-- 8. VISTA: HISTORIAL COMPLETO
+--
+-- Incluye cliente opcional.
+-- Si no existe cliente:
+-- "Cliente ocasional"
+-- ============================================================
+
+CREATE OR REPLACE VIEW public.v_historial_estadias AS
+SELECT
+    e.estadia_id,
+
+    e.fecha_entrada,
+    e.fecha_salida,
+    e.duracion_minutos,
+    e.total,
+    e.estado,
+
+    v.vehiculo_id,
+    v.placa,
+
+    tv.tipo_vehiculo_id,
+    tv.nombre AS tipo_vehiculo,
+
+    c.cliente_id,
+
+    CASE
+        WHEN c.cliente_id IS NULL THEN 'Cliente ocasional'
+        ELSE c.nombre || ' ' || c.apellido
+    END AS cliente,
+
+    es.espacio_id,
+    es.codigo AS espacio,
+
+    z.zona_id,
+    z.nombre AS zona,
+
+    t.tarifa_id,
+    t.nombre AS tarifa,
+    t.precio_hora,
+
+    u.usuario_id,
+    u.nombre_usuario AS usuario_operador
+
+FROM public.estadias e
+
+JOIN public.vehiculos v
+    ON v.vehiculo_id = e.vehiculo_id
+
+JOIN public.tipos_vehiculo tv
+    ON tv.tipo_vehiculo_id = v.tipo_vehiculo_id
+
+LEFT JOIN public.clientes c
+    ON c.cliente_id = v.cliente_id
+
+JOIN public.espacios es
+    ON es.espacio_id = e.espacio_id
+
+JOIN public.zonas z
+    ON z.zona_id = es.zona_id
+
+JOIN public.tarifas t
+    ON t.tarifa_id = e.tarifa_id
+
+JOIN public.usuarios u
+    ON u.usuario_id = e.usuario_id;
+
+
+COMMIT;
+
+//
+
+-- Verificar columnas actuales de estadias
+SELECT
+    column_name,
+    data_type,
+    is_nullable
+FROM information_schema.columns
+WHERE table_schema = 'public'
+  AND table_name = 'estadias'
+ORDER BY ordinal_position;
+
+//
+
+-- Verificar funciones de ParkControl
+SELECT
+    routine_name,
+    routine_type
+FROM information_schema.routines
+WHERE routine_schema = 'public'
+  AND routine_name IN (
+      'registrar_entrada',
+      'registrar_salida'
+  )
+ORDER BY routine_name;
+
+//
+
+-- Verificar cantidad de registros principales
+SELECT 'clientes' AS tabla, COUNT(*) AS registros FROM clientes
+UNION ALL
+SELECT 'vehiculos', COUNT(*) FROM vehiculos
+UNION ALL
+SELECT 'espacios', COUNT(*) FROM espacios
+UNION ALL
+SELECT 'estadias', COUNT(*) FROM estadias
+UNION ALL
+SELECT 'pagos', COUNT(*) FROM pagos;
+
+
+//
+
+-- ParkControl: hacer opcional el cliente asociado al vehículo
+
+ALTER TABLE public.vehiculos
+ALTER COLUMN cliente_id DROP NOT NULL;
+
+ALTER TABLE public.vehiculos
+DROP CONSTRAINT fk_vehiculo_cliente;
+
+ALTER TABLE public.vehiculos
+ADD CONSTRAINT fk_vehiculo_cliente
+FOREIGN KEY (cliente_id)
+REFERENCES public.clientes(cliente_id)
+ON UPDATE CASCADE
+ON DELETE SET NULL;
+
+
+//
+
+
+SELECT
+    column_name,
+    is_nullable
+FROM information_schema.columns
+WHERE table_schema = 'public'
+  AND table_name = 'vehiculos'
+  AND column_name = 'cliente_id';
+
+//
+
+
