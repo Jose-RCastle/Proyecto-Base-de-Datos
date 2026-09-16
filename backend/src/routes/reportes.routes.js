@@ -2,6 +2,12 @@ import { Router } from 'express';
 import pool from '../config/database.js';
 const router = Router();
 const consulta = (sql) => async (_req, res, next) => { try { const { rows } = await pool.query(sql); res.json(rows); } catch (error) { next(error); } };
+const fechaReporte = (fecha) => {
+    if (fecha instanceof Date && !Number.isNaN(fecha.valueOf())) return fecha.toISOString().slice(0, 10);
+
+    const coincidencia = String(fecha ?? '').match(/^\d{4}-\d{2}-\d{2}/);
+    return coincidencia ? coincidencia[0] : null;
+};
 
 router.get('/ocupacion', consulta(`SELECT COUNT(*) AS total_espacios, COUNT(*) FILTER (WHERE estado = 'OCUPADO') AS ocupados, COUNT(*) FILTER (WHERE estado = 'DISPONIBLE') AS disponibles, ROUND(COUNT(*) FILTER (WHERE estado = 'OCUPADO') * 100.0 / NULLIF(COUNT(*), 0), 2) AS porcentaje_ocupacion FROM espacios`));
 router.get('/ingresos', consulta(`SELECT COUNT(*) AS cantidad_pagos, COALESCE(SUM(monto), 0) AS ingresos_totales, COALESCE(AVG(monto), 0) AS promedio_por_pago, COALESCE(MIN(monto), 0) AS pago_minimo, COALESCE(MAX(monto), 0) AS pago_maximo FROM pagos`));
@@ -26,7 +32,10 @@ router.get('/ingresos-mes', async (req, res, next) => {
             [`${mes}-01`]
         );
 
-        res.json(rows);
+        res.json(rows.map(({ fecha, ...ingreso }) => ({
+            ...ingreso,
+            fecha: fechaReporte(fecha)
+        })));
     } catch (error) {
         next(error);
     }
