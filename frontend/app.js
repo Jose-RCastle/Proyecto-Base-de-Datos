@@ -4,12 +4,98 @@ const money=v=>`L ${Number(v||0).toLocaleString('es-HN',{minimumFractionDigits:2
 const date=v=>v?new Intl.DateTimeFormat('es-HN',{dateStyle:'medium',timeStyle:'short'}).format(new Date(v)):'—';
 const esc=v=>String(v??'—').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 const badge=s=>`<span class="badge ${esc(s)}">${esc(s)}</span>`;
-async function api(path, options){const r=await fetch(API+path,options);const data=await r.json();if(!r.ok)throw Error(data.error||'No se pudo completar la operación.');return data}
+async function api(path, options) {
+    try {
+        const r = await fetch(API + path, options);
+
+        const text = await r.text();
+
+        let data;
+
+        try {
+            data = text ? JSON.parse(text) : {};
+        } catch {
+            data = {
+                error: text || 'El servidor devolvió una respuesta no válida.'
+            };
+        }
+
+        if (!r.ok) {
+            throw new Error(
+                data.error ||
+                `Error HTTP ${r.status}`
+            );
+        }
+
+        return data;
+
+    } catch (err) {
+        console.error(`API ${path}:`, err);
+
+        if (err.name === 'TypeError') {
+            throw new Error(
+                'No se pudo conectar con el servidor. Verifique que el backend esté ejecutándose en el puerto 3000.'
+            );
+        }
+
+        throw err;
+    }
+}
 const get=path=>api(path);
 function notice(message,type='success'){noticeEl.className=type;noticeEl.textContent=message;noticeEl.style.display='block'}
 function clearNotice(){noticeEl.style.display='none';noticeEl.textContent=''}
 function table(headers, rows){return rows.length?`<div class="table-wrap"><table><thead><tr>${headers.map(x=>`<th>${x}</th>`).join('')}</tr></thead><tbody>${rows.join('')}</tbody></table></div>`:'<p class="empty">No hay registros para mostrar.</p>'}
-function formSubmit(selector,path,method,onSuccess){document.querySelector(selector).onsubmit=async e=>{e.preventDefault();clearNotice();const b=e.target.querySelector('[type=submit]');b.disabled=true;try{const data=await api(path,{method,headers:{'Content-Type':'application/json'},body:JSON.stringify(Object.fromEntries(new FormData(e.target)))});notice('Operación realizada correctamente.');onSuccess?.(data,e.target)}catch(err){notice(err.message,'error')}finally{b.disabled=false}}}
+function formSubmit(selector, path, method, onSuccess) {
+    const form = document.querySelector(selector);
+
+    if (!form) {
+        console.error(`No se encontró el formulario: ${selector}`);
+        return;
+    }
+
+    form.onsubmit = async e => {
+        e.preventDefault();
+        clearNotice();
+
+        const button = e.target.querySelector(
+            'button[type="submit"], input[type="submit"], button.submit'
+        );
+
+        if (button) {
+            button.disabled = true;
+        }
+
+        try {
+            const data = await api(path, {
+                method,
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(
+                    Object.fromEntries(new FormData(e.target))
+                )
+            });
+
+            notice('Operación realizada correctamente.');
+
+            if (onSuccess) {
+                await onSuccess(data, e.target);
+            }
+
+        } catch (err) {
+            console.error('Error en formulario:', err);
+            notice(
+                err.message || 'No se pudo completar la operación.',
+                'error'
+            );
+
+        } finally {
+            if (button) {
+                button.disabled = false;
+            }
+        }
+    };
+}
 function ticket(x, salida=false){return `<div class="modal"><article class="ticket"><button class="close" onclick="this.closest('.modal').remove()">×</button><h2>PARKCONTROL</h2><p>Sistema de Gestión de Estacionamiento</p><hr><h3>Ticket de ${salida?'salida':'entrada'}</h3><dl><dt>Estadía</dt><dd>#${x.estadia_id}</dd><dt>Placa</dt><dd>${esc(x.placa)}</dd><dt>Tipo</dt><dd>${esc(x.tipo_vehiculo)}</dd><dt>Espacio / zona</dt><dd>${esc(x.espacio)} · ${esc(x.zona)}</dd><dt>Entrada</dt><dd>${date(x.fecha_entrada)}</dd>${salida?`<dt>Salida</dt><dd>${date(x.fecha_salida)}</dd><dt>Duración</dt><dd>${x.duracion_minutos} minutos</dd><dt>Tarifa</dt><dd>${money(x.precio_hora)} / hora</dd><dt>Total</dt><dd class="total">${money(x.total)}</dd><dt>Pago</dt><dd>${esc(x.metodo_pago)}</dd>`:`<dt>Tarifa por hora</dt><dd>${money(x.precio_hora)}</dd>`}</dl><p>${salida?'Gracias por utilizar ParkControl.':'Conserve este ticket para registrar su salida.'}</p><button class="submit" onclick="window.print()">Imprimir ticket</button></article></div>`}
 async function dashboard(){const [d,spaces]=await Promise.all([get('/dashboard'),get('/espacios')]),r=d.resumen;content.innerHTML=`<div class="stats"><div class="card"><span>Total de espacios</span><b>${r.total_espacios}</b></div><div class="card"><span>Ocupados</span><b>${r.ocupados}</b></div><div class="card"><span>Disponibles</span><b>${r.disponibles}</b></div><div class="card"><span>Ocupación</span><b>${r.porcentaje_ocupacion||0}%</b></div><div class="card"><span>Ingresos de hoy</span><b class="money">${money(r.ingresos_hoy)}</b></div></div><div class="grid"><article class="panel"><h2>Mapa de espacios</h2><div class="parking-grid">${spaces.map(s=>`<div class="spot ${s.estado.toLowerCase()}"><strong>${esc(s.codigo)}</strong><small>${esc(s.zona)} · ${esc(s.tipo_vehiculo)}</small>${badge(s.estado)}</div>`).join('')}</div></article><article class="panel"><h2>Estadías activas (${d.estadias_activas.length})</h2>${table(['ID','Placa','Ubicación','Entrada'],d.estadias_activas.map(x=>`<tr><td>#${x.estadia_id}</td><td>${esc(x.placa)}</td><td>${esc(x.zona)} · ${esc(x.espacio)}</td><td>${date(x.fecha_entrada)}</td></tr>`))}</article></div><div class="grid"><article class="panel"><h2>Últimas estadías</h2>${table(['Cliente','Placa','Estado','Total'],d.ultimas_estadias.map(x=>`<tr><td>${esc(x.cliente)}</td><td>${esc(x.placa)}</td><td>${badge(x.estado)}</td><td>${money(x.total)}</td></tr>`))}</article><article class="panel"><h2>Últimos pagos</h2>${table(['Estadía','Método','Monto'],d.ultimos_pagos.map(x=>`<tr><td>#${x.estadia_id}</td><td>${esc(x.metodo_pago)}</td><td>${money(x.monto)}</td></tr>`))}</article></div>`}
 async function entrada(){const [vehicles,users]=await Promise.all([get('/vehiculos'),get('/usuarios')]);content.innerHTML=`<div class="split"><form class="form-card" id="entry"><h2>Registrar entrada</h2><p>La fecha y hora son asignadas por PostgreSQL.</p><label>Buscar vehículo por placa</label><input id="vehicleSearch" placeholder="Escriba una placa"><label>Vehículo existente</label><select name="placa" id="entryVehicle" required><option value="">Seleccione un vehículo</option>${vehicles.map(v=>`<option value="${esc(v.placa)}" data-type="${v.tipo_vehiculo_id}">${esc(v.placa)} — ${esc(v.cliente)} · ${esc(v.tipo_vehiculo)} ${esc(v.marca||'')}</option>`).join('')}</select><button type="button" class="secondary" id="newVehicle">Registrar vehículo nuevo</button><label>Espacio disponible compatible</label><select name="codigo_espacio" id="entrySpace" required disabled><option>Seleccione primero un vehículo</option></select><label>Usuario operador</label><select name="nombre_usuario" required><option value="">Seleccione operador</option>${users.map(u=>`<option value="${esc(u.nombre_usuario)}">${esc(u.nombre_completo)} (${esc(u.nombre_usuario)})</option>`).join('')}</select><button class="submit">Registrar entrada</button></form><article class="panel"><h2>Flujo rápido</h2><p class="empty">Seleccione un vehículo. Solo verá espacios disponibles y compatibles con su tipo. La función <code>registrar_entrada</code> valida y registra la operación.</p></article></div>`;const vehicle=document.querySelector('#entryVehicle'),space=document.querySelector('#entrySpace');document.querySelector('#vehicleSearch').oninput=e=>{const q=e.target.value.toLowerCase();[...vehicle.options].forEach((o,i)=>o.hidden=i>0&&!o.textContent.toLowerCase().includes(q))};vehicle.onchange=async()=>{space.disabled=!vehicle.value;if(!vehicle.value)return;const type=vehicle.selectedOptions[0].dataset.type, spaces=await get(`/espacios?disponibles=true&tipo_vehiculo_id=${type}`);space.innerHTML=`<option value="">Seleccione un espacio</option>${spaces.map(s=>`<option value="${esc(s.codigo)}">${esc(s.codigo)} — ${esc(s.zona)} — ${esc(s.tipo_vehiculo)}</option>`).join('')}`};document.querySelector('#newVehicle').onclick=()=>vehicleForm();formSubmit('#entry','/entrada','POST',data=>{notice(`Entrada registrada: estadía #${data.estadia_id}, ${data.placa}, espacio ${data.espacio}.`);content.insertAdjacentHTML('beforeend',ticket(data))})}
@@ -23,6 +109,16 @@ async function spaces(){const rows=await get('/espacios');content.innerHTML=`<ar
 async function stays(){content.innerHTML=`<article class="panel"><div class="panel-title"><h2>Historial de estadías</h2><div class="filters"><select id="period"><option value="hoy">Hoy</option><option value="ayer">Ayer</option><option value="fecha">Fecha específica</option><option value="rango">Desde / hasta</option><option value="todas">Todas</option></select><input id="specificDate" type="date" title="Fecha específica"><input id="fromDate" type="date" title="Desde"><input id="toDate" type="date" title="Hasta"><button class="secondary" id="filter">Filtrar</button></div></div><div id="stayTable"><p class="empty">Cargando…</p></div></article>`;async function load(){const period=document.querySelector('#period').value,params=new URLSearchParams();if(period==='fecha')params.set('fecha',document.querySelector('#specificDate').value);else if(period==='rango'){params.set('desde',document.querySelector('#fromDate').value);params.set('hasta',document.querySelector('#toDate').value)}else if(period!=='todas')params.set('periodo',period);const rows=await get('/estadias'+(params.toString()?`?${params}`:''));document.querySelector('#stayTable').innerHTML=table(['ID','Cliente / placa','Ubicación','Entrada','Salida','Duración','Tarifa','Total','Estado'],rows.map(x=>`<tr><td>#${x.estadia_id}</td><td>${esc(x.cliente)}<br><small>${esc(x.placa)} · ${esc(x.tipo_vehiculo)}</small></td><td>${esc(x.zona)} · ${esc(x.espacio)}</td><td>${date(x.fecha_entrada)}</td><td>${date(x.fecha_salida)}</td><td>${x.duracion_minutos??'—'} min</td><td>${money(x.precio_hora)}</td><td>${money(x.total)}</td><td>${badge(x.estado)}</td></tr>`))}document.querySelector('#period').onchange=load;document.querySelector('#filter').onclick=load;load()}
 async function payments(){const rows=await get('/pagos');content.innerHTML=`<article class="panel"><h2>Pagos registrados</h2>${table(['Pago','Estadía','Placa','Método','Monto','Fecha'],rows.map(x=>`<tr><td>#${x.pago_id}</td><td>#${x.estadia_id}</td><td>${esc(x.placa)}</td><td>${esc(x.metodo_pago)}</td><td>${money(x.monto)}</td><td>${date(x.fecha_pago)}</td></tr>`))}</article>`}
 async function reports(){const paths=['ocupacion','ingresos','ingresos-metodo','vehiculos-tipo','estadias-estado','ingresos-fecha'],names=['A. Ocupación','B. Ingresos generales','C. Ingresos por método','D. Vehículos por tipo','E. Estadías por estado','F. Ingresos por fecha'];const data=await Promise.all(paths.map(p=>get('/reportes/'+p)));const make=(name,rows)=>`<article class="panel"><h2>${name}</h2>${table(Object.keys(rows[0]||{}),rows.map(r=>`<tr>${Object.values(r).map(v=>`<td>${esc(v)}</td>`).join('')}</tr>`))}</article>`;content.innerHTML=`<div class="report-grid">${data.map((x,i)=>make(names[i],x)).join('')}</div><article class="panel"><h2>G. Historial completo (JOIN)</h2><p class="empty">Disponible en <code>GET /api/reportes/historial</code> y en la sección Estadías.</p></article>`}
-const views={dashboard,entrada,salida,clientes,vehiculos,espacios,estadias:stays,pagos:payments,reportes:reports};
+const views = {
+    dashboard: dashboard,
+    entrada: entrada,
+    salida: salida,
+    clientes: clients,
+    vehiculos: vehicles,
+    espacios: spaces,
+    estadias: stays,
+    pagos: payments,
+    reportes: reports
+};
 async function show(view){clearNotice();document.querySelector('#title').textContent=titles[view];content.innerHTML='<p class="empty">Cargando información desde PostgreSQL…</p>';try{await views[view]()}catch(e){content.innerHTML=`<article class="panel"><h2>No fue posible cargar los datos</h2><p class="empty">${esc(e.message)}</p></article>`}}
 document.querySelectorAll('#nav button').forEach(b=>b.onclick=()=>{document.querySelector('#nav .active')?.classList.remove('active');b.classList.add('active');show(b.dataset.view)});show('dashboard');

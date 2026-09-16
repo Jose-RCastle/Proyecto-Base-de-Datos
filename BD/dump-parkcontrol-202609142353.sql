@@ -1234,7 +1234,6 @@ ALTER TABLE ONLY public.vehiculos
 --
 -- Migración
 --
-
 BEGIN;
 
 -- ============================================================
@@ -1712,3 +1711,462 @@ WHERE table_schema = 'public'
 //
 
 
+SELECT
+    proname AS funcion,
+    pg_get_function_identity_arguments(oid) AS argumentos
+FROM pg_proc
+WHERE pronamespace = 'public'::regnamespace
+  AND proname IN ('registrar_entrada', 'registrar_salida')
+ORDER BY proname, argumentos;
+
+//
+
+CREATE OR REPLACE FUNCTION public.registrar_entrada(
+    p_placa VARCHAR,
+    p_codigo_espacio VARCHAR,
+    p_nombre_usuario VARCHAR,
+    p_fecha_entrada TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+RETURNS INTEGER
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_vehiculo_id INTEGER;
+    v_tipo_vehiculo_id INTEGER;
+    v_espacio_id INTEGER;
+    v_tipo_espacio_id INTEGER;
+    v_tarifa_id INTEGER;
+    v_usuario_id INTEGER;
+    v_estadia_id INTEGER;
+    v_estado_espacio VARCHAR(20);
+    v_placa VARCHAR(15);
+BEGIN
+
+    v_placa := UPPER(TRIM(p_placa));
+
+    SELECT
+        vehiculo_id,
+        tipo_vehiculo_id
+    INTO
+        v_vehiculo_id,
+        v_tipo_vehiculo_id
+    FROM public.vehiculos
+    WHERE UPPER(TRIM(placa)) = v_placa;
+
+    IF v_vehiculo_id IS NULL THEN
+        RAISE EXCEPTION
+            'El vehículo con placa % no existe.',
+            v_placa;
+    END IF;
+
+
+    SELECT
+        espacio_id,
+        tipo_vehiculo_id,
+        estado
+    INTO
+        v_espacio_id,
+        v_tipo_espacio_id,
+        v_estado_espacio
+    FROM public.espacios
+    WHERE UPPER(TRIM(codigo)) = UPPER(TRIM(p_codigo_espacio));
+
+
+    IF v_espacio_id IS NULL THEN
+        RAISE EXCEPTION
+            'El espacio % no existe.',
+            p_codigo_espacio;
+    END IF;
+
+
+    IF v_estado_espacio <> 'DISPONIBLE' THEN
+        RAISE EXCEPTION
+            'El espacio % no está disponible. Estado actual: %',
+            p_codigo_espacio,
+            v_estado_espacio;
+    END IF;
+
+
+    IF v_tipo_vehiculo_id <> v_tipo_espacio_id THEN
+        RAISE EXCEPTION
+            'El vehículo no es compatible con el espacio %.',
+            p_codigo_espacio;
+    END IF;
+
+
+    SELECT t.tarifa_id
+    INTO v_tarifa_id
+    FROM public.tarifas t
+    WHERE t.tipo_vehiculo_id = v_tipo_vehiculo_id
+      AND t.activa = TRUE
+    ORDER BY t.tarifa_id
+    LIMIT 1;
+
+
+    IF v_tarifa_id IS NULL THEN
+        RAISE EXCEPTION
+            'No existe una tarifa activa para el vehículo con placa %.',
+            v_placa;
+    END IF;
+
+
+    SELECT usuario_id
+    INTO v_usuario_id
+    FROM public.usuarios
+    WHERE nombre_usuario = p_nombre_usuario
+      AND activo = TRUE;
+
+
+    IF v_usuario_id IS NULL THEN
+        RAISE EXCEPTION
+            'El usuario % no existe o está inactivo.',
+            p_nombre_usuario;
+    END IF;
+
+
+    IF EXISTS (
+        SELECT 1
+        FROM public.estadias
+        WHERE vehiculo_id = v_vehiculo_id
+          AND estado = 'ACTIVA'
+    ) THEN
+        RAISE EXCEPTION
+            'El vehículo % ya tiene una estadía activa.',
+            v_placa;
+    END IF;
+
+
+    IF p_fecha_entrada > CURRENT_TIMESTAMP THEN
+        RAISE EXCEPTION
+            'La fecha de entrada no puede ser posterior a la fecha actual.';
+    END IF;
+
+
+    INSERT INTO public.estadias (
+        vehiculo_id,
+        espacio_id,
+        tarifa_id,
+        usuario_id,
+        fecha_entrada,
+        estado
+    )
+    VALUES (
+        v_vehiculo_id,
+        v_espacio_id,
+        v_tarifa_id,
+        v_usuario_id,
+        p_fecha_entrada,
+        'ACTIVA'
+    )
+    RETURNING estadia_id
+    INTO v_estadia_id;
+
+
+    UPDATE public.espacios
+    SET estado = 'OCUPADO'
+    WHERE espacio_id = v_espacio_id;
+
+
+    RETURN v_estadia_id;
+
+END;
+$$;
+
+//
+
+CREATE OR REPLACE FUNCTION public.registrar_salida(
+    p_estadia_id INTEGER,
+    p_metodo_pago VARCHAR,
+    p_fecha_salida TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+RETURNS NUMERIC
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_fecha_entrada TIMESTAMP;
+    v_fecha_salida TIMESTAMP;
+    v_duracion_minutos INTEGER;
+    v_horas INTEGER;
+    v_precio_hora NUMERIC(10,2);
+    v_total NUMERIC(10,2);
+    v_espacio_id INTEGER;
+    v_metodo_pago_id INTEGER;
+    v_estado VARCHAR(20);
+BEGIN
+
+    SELECT
+        fecha_entrada,
+        espacio_id,
+        estado
+    INTO
+        v_fecha_entrada,
+        v_espacio_id,
+        v_estado
+    FROM public.estadias
+    WHERE estadia_id = p_estadia_id;
+
+
+    IF v_fecha_entrada IS NULL THEN
+        RAISE EXCEPTION
+            'La estadía % no existe.',
+            p_estadia_id;
+    END IF;
+
+
+    IF v_estado <> 'ACTIVA' THEN
+        RAISE EXCEPTION
+            'La estadía % no está activa.',
+            p_estadia_id;
+    END IF;
+
+
+    SELECT metodo_pago_id
+    INTO v_metodo_pago_id
+    FROM public.metodos_pago
+    WHERE LOWER(nombre) = LOWER(TRIM(p_metodo_pago));
+
+
+    IF v_metodo_pago_id IS NULL THEN
+        RAISE EXCEPTION
+            'El método de pago "%" no existe.',
+            p_metodo_pago;
+    END IF;
+
+
+    v_fecha_salida := p_fecha_salida;
+
+
+    IF v_fecha_salida < v_fecha_entrada THEN
+        RAISE EXCEPTION
+            'La fecha de salida no puede ser anterior a la fecha de entrada.';
+    END IF;
+
+
+    v_duracion_minutos :=
+        FLOOR(
+            EXTRACT(
+                EPOCH FROM (v_fecha_salida - v_fecha_entrada)
+            ) / 60
+        );
+
+
+    SELECT t.precio_hora
+    INTO v_precio_hora
+    FROM public.tarifas t
+    JOIN public.estadias e
+        ON e.tarifa_id = t.tarifa_id
+    WHERE e.estadia_id = p_estadia_id;
+
+
+    IF v_precio_hora IS NULL THEN
+        RAISE EXCEPTION
+            'No se encontró la tarifa de la estadía %.',
+            p_estadia_id;
+    END IF;
+
+
+    v_horas := CEIL(v_duracion_minutos / 60.0);
+
+
+    IF v_horas < 1 THEN
+        v_horas := 1;
+    END IF;
+
+
+    v_total := v_horas * v_precio_hora;
+
+
+    UPDATE public.estadias
+    SET
+        fecha_salida = v_fecha_salida,
+        duracion_minutos = v_duracion_minutos,
+        total = v_total,
+        estado = 'FINALIZADA'
+    WHERE estadia_id = p_estadia_id;
+
+
+    UPDATE public.espacios
+    SET estado = 'DISPONIBLE'
+    WHERE espacio_id = v_espacio_id;
+
+
+    INSERT INTO public.pagos (
+        estadia_id,
+        metodo_pago_id,
+        monto,
+        fecha_pago
+    )
+    VALUES (
+        p_estadia_id,
+        v_metodo_pago_id,
+        v_total,
+        v_fecha_salida
+    );
+
+
+    RETURN v_total;
+
+END;
+$$;
+
+
+
+
+DROP FUNCTION IF EXISTS public.registrar_entrada(
+    character varying,
+    character varying,
+    character varying
+);
+
+DROP FUNCTION IF EXISTS public.registrar_salida(
+    integer,
+    character varying
+);
+
+//
+
+CREATE OR REPLACE FUNCTION public.registrar_salida(
+    p_estadia_id INTEGER,
+    p_metodo_pago VARCHAR,
+    p_fecha_salida TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+RETURNS NUMERIC
+LANGUAGE plpgsql
+AS $$
+DECLARE
+    v_fecha_entrada TIMESTAMP;
+    v_fecha_salida TIMESTAMP;
+    v_duracion_minutos INTEGER;
+    v_horas INTEGER;
+    v_precio_hora NUMERIC(10,2);
+    v_total NUMERIC(10,2);
+    v_espacio_id INTEGER;
+    v_metodo_pago_id INTEGER;
+    v_estado VARCHAR(20);
+BEGIN
+
+    SELECT
+        fecha_entrada,
+        espacio_id,
+        estado
+    INTO
+        v_fecha_entrada,
+        v_espacio_id,
+        v_estado
+    FROM public.estadias
+    WHERE estadia_id = p_estadia_id;
+
+
+    IF v_fecha_entrada IS NULL THEN
+        RAISE EXCEPTION
+            'La estadía % no existe.',
+            p_estadia_id;
+    END IF;
+
+
+    IF v_estado <> 'ACTIVA' THEN
+        RAISE EXCEPTION
+            'La estadía % no está activa.',
+            p_estadia_id;
+    END IF;
+
+
+    SELECT metodo_pago_id
+    INTO v_metodo_pago_id
+    FROM public.metodos_pago
+    WHERE LOWER(nombre) = LOWER(TRIM(p_metodo_pago));
+
+
+    IF v_metodo_pago_id IS NULL THEN
+        RAISE EXCEPTION
+            'El método de pago "%" no existe.',
+            p_metodo_pago;
+    END IF;
+
+
+    v_fecha_salida := p_fecha_salida;
+
+
+    IF v_fecha_salida < v_fecha_entrada THEN
+        RAISE EXCEPTION
+            'La fecha de salida no puede ser anterior a la fecha de entrada.';
+    END IF;
+
+
+    v_duracion_minutos :=
+        FLOOR(
+            EXTRACT(
+                EPOCH FROM (v_fecha_salida - v_fecha_entrada)
+            ) / 60
+        );
+
+
+    SELECT t.precio_hora
+    INTO v_precio_hora
+    FROM public.tarifas t
+    JOIN public.estadias e
+        ON e.tarifa_id = t.tarifa_id
+    WHERE e.estadia_id = p_estadia_id;
+
+
+    IF v_precio_hora IS NULL THEN
+        RAISE EXCEPTION
+            'No se encontró la tarifa de la estadía %.',
+            p_estadia_id;
+    END IF;
+
+
+    v_horas := CEIL(v_duracion_minutos / 60.0);
+
+
+    IF v_horas < 1 THEN
+        v_horas := 1;
+    END IF;
+
+
+    v_total := v_horas * v_precio_hora;
+
+
+    UPDATE public.estadias
+    SET
+        fecha_salida = v_fecha_salida,
+        duracion_minutos = v_duracion_minutos,
+        total = v_total,
+        estado = 'FINALIZADA'
+    WHERE estadia_id = p_estadia_id;
+
+
+    UPDATE public.espacios
+    SET estado = 'DISPONIBLE'
+    WHERE espacio_id = v_espacio_id;
+
+
+    INSERT INTO public.pagos (
+        estadia_id,
+        metodo_pago_id,
+        monto,
+        fecha_pago
+    )
+    VALUES (
+        p_estadia_id,
+        v_metodo_pago_id,
+        v_total,
+        v_fecha_salida
+    );
+
+
+    RETURN v_total;
+
+END;
+$$;
+
+
+SELECT
+    p.proname AS funcion,
+    pg_get_function_identity_arguments(p.oid) AS parametros
+FROM pg_proc p
+JOIN pg_namespace n
+    ON n.oid = p.pronamespace
+WHERE n.nspname = 'public'
+  AND p.proname IN ('registrar_entrada', 'registrar_salida')
+ORDER BY p.proname, parametros;
