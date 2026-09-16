@@ -3,6 +3,36 @@ import pool from '../config/database.js';
 
 const router = Router();
 
+// `datetime-local` sends a local timestamp without a timezone.  Validate its
+// shape here so PostgreSQL receives an unambiguous timestamp while leaving the
+// operational validations and billing rules to the stored functions.
+const timestampWithoutTimezone = value => {
+    if (typeof value !== 'string') return null;
+
+    const match = value.trim().match(
+        /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2}))?$/
+    );
+
+    if (!match) return null;
+
+    const [, year, month, day, hour, minute, second = '00'] = match;
+    const parsed = new Date(
+        Number(year), Number(month) - 1, Number(day),
+        Number(hour), Number(minute), Number(second)
+    );
+
+    if (
+        parsed.getFullYear() !== Number(year) ||
+        parsed.getMonth() !== Number(month) - 1 ||
+        parsed.getDate() !== Number(day) ||
+        parsed.getHours() !== Number(hour) ||
+        parsed.getMinutes() !== Number(minute) ||
+        parsed.getSeconds() !== Number(second)
+    ) return null;
+
+    return `${year}-${month}-${day}T${hour}:${minute}:${second}`;
+};
+
 const historial = `
     SELECT
         e.estadia_id,
@@ -123,15 +153,18 @@ router.post('/entrada', async (req, res, next) => {
     const {
         placa,
         codigo_espacio,
-        nombre_usuario
+        nombre_usuario,
+        fecha_entrada
     } = req.body;
+    const fechaEntrada = timestampWithoutTimezone(fecha_entrada);
 
     if (
         ![placa, codigo_espacio, nombre_usuario]
             .every(v => typeof v === 'string' && v.trim())
+        || !fechaEntrada
     ) {
         return res.status(400).json({
-            error: 'Vehículo, espacio y usuario son obligatorios.'
+            error: 'Vehículo, espacio, usuario operador y fecha de entrada válidos son obligatorios.'
         });
     }
 
@@ -139,12 +172,13 @@ router.post('/entrada', async (req, res, next) => {
 
         const { rows } = await pool.query(
             `
-            SELECT registrar_entrada($1, $2, $3) AS estadia_id
+            SELECT registrar_entrada($1, $2, $3, $4) AS estadia_id
             `,
             [
                 placa.trim(),
                 codigo_espacio.trim(),
-                nombre_usuario.trim()
+                nombre_usuario.trim(),
+                fechaEntrada
             ]
         );
 
@@ -174,15 +208,18 @@ router.post('/salida', async (req, res, next) => {
 
     const {
         estadia_id,
-        metodo_pago
+        metodo_pago,
+        fecha_salida
     } = req.body;
+    const fechaSalida = timestampWithoutTimezone(fecha_salida);
 
     if (
         !Number.isInteger(Number(estadia_id)) ||
-        !metodo_pago?.trim()
+        !metodo_pago?.trim() ||
+        !fechaSalida
     ) {
         return res.status(400).json({
-            error: 'Seleccione una estadía activa y un método de pago.'
+            error: 'Seleccione una estadía activa, un método de pago y una fecha de salida válida.'
         });
     }
 
@@ -190,11 +227,12 @@ router.post('/salida', async (req, res, next) => {
 
         await pool.query(
             `
-            SELECT registrar_salida($1, $2) AS total
+            SELECT registrar_salida($1, $2, $3) AS total
             `,
             [
                 Number(estadia_id),
-                metodo_pago.trim()
+                metodo_pago.trim(),
+                fechaSalida
             ]
         );
 
