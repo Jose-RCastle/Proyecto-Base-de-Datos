@@ -2,6 +2,10 @@ const API='http://localhost:3000/api', content=document.querySelector('#content'
 const titles={dashboard:'Dashboard',entrada:'Registrar entrada',salida:'Registrar salida',espacios:'Espacios de estacionamiento',estadias:'Historial de estadías',clientes:'Clientes',vehiculos:'Vehículos',pagos:'Pagos registrados',reportes:'Reportes'};
 const money=v=>`L ${Number(v||0).toLocaleString('es-HN',{minimumFractionDigits:2,maximumFractionDigits:2})}`;
 const date=v=>v?new Intl.DateTimeFormat('es-HN',{dateStyle:'medium',timeStyle:'short'}).format(new Date(v)):'—';
+const reportMonths=['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre'];
+const reportDateParts=value=>String(value??'').match(/^(\d{4})-(\d{2})-(\d{2})/);
+const reportMonth=value=>{const parts=String(value??'').match(/^(\d{4})-(0[1-9]|1[0-2])$/);return parts?`${reportMonths[Number(parts[2])-1]} de ${parts[1]}`:'—'};
+const reportDate=value=>{const parts=reportDateParts(value);return parts?`${Number(parts[3])}/${Number(parts[2])}/${parts[1]}`:'—'};
 const esc=v=>String(v??'—').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 const badge=s=>`<span class="badge ${esc(s)}">${esc(s)}</span>`;
 async function api(path, options) {
@@ -155,7 +159,7 @@ async function reports(){
         const month=document.querySelector('#reportMonth').value;
         const rows=await get(`/reportes/ingresos-mes?mes=${encodeURIComponent(month)}`);
         const total=rows.reduce((sum,row)=>sum+Number(row.ingresos_totales||0),0);
-        document.querySelector('#monthlyIncome').innerHTML=`<p><strong>${esc(new Intl.DateTimeFormat('es-HN',{month:'long',year:'numeric'}).format(new Date(`${month}-01T00:00:00`)))}</strong></p>${table(['Fecha','Pagos','Ingresos'],rows.map(row=>`<tr><td>${esc(new Intl.DateTimeFormat('es-HN',{dateStyle:'short'}).format(new Date(`${row.fecha}T00:00:00`)))}</td><td>${esc(row.cantidad_pagos)}</td><td>${money(row.ingresos_totales)}</td></tr>`))}<p><strong>Total mensual: ${money(total)}</strong></p>`;
+        document.querySelector('#monthlyIncome').innerHTML=`<p><strong>${esc(reportMonth(month))}</strong></p>${table(['Fecha','Pagos','Ingresos'],rows.map(row=>`<tr><td>${esc(reportDate(row.fecha))}</td><td>${esc(row.cantidad_pagos)}</td><td>${money(row.ingresos_totales)}</td></tr>`))}<p><strong>Total mensual: ${money(total)}</strong></p>`;
     };
     document.querySelector('#reportMonth').onchange=()=>loadMonthlyIncome().catch(error=>notice(error.message,'error'));
     await loadMonthlyIncome();
